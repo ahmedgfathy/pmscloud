@@ -16,48 +16,76 @@ class FileController extends Controller
                 throw new \Exception('No file was uploaded');
             }
 
-            $file = $request->file('files');
-            
-            if (!$file->isValid()) {
-                throw new \Exception('Invalid file upload');
-            }
-
-            $userId = auth()->id();
-            $basePath = "uploads/users/{$userId}/" . now()->format('Y/m/d');
-            
-            // Create directory if it doesn't exist
-            if (!Storage::disk('public')->exists($basePath)) {
-                Storage::disk('public')->makeDirectory($basePath);
-            }
-            
-            // Store file with original name
-            $filename = $file->getClientOriginalName();
-            $storedPath = $file->storeAs($basePath, $filename, 'public');
-            
-            if (!$storedPath) {
-                throw new \Exception('Failed to store file');
-            }
-
-            $fileModel = File::create([
-                'user_id' => $userId,
-                'name' => $filename,
-                'path' => $storedPath,
-                'mime_type' => $file->getMimeType(),
-                'size' => $file->getSize(),
-                'folder_path' => $basePath,
+            $request->validate([
+                'files.*' => 'required|file|max:' . (500 * 1024),
             ]);
+
+            // Ensure storage directory exists
+            Storage::disk('public')->makeDirectory('uploads', 0755, true);
+
+            $files = is_array($request->file('files')) ? $request->file('files') : [$request->file('files')];
+            $uploadedFiles = [];
+            $userId = auth()->id();
+
+            foreach ($files as $file) {
+                try {
+                    if (!$file->isValid()) {
+                        continue;
+                    }
+
+                    $folderPath = $request->input('folder_path', '');
+                    $basePath = "uploads/users/{$userId}/" . now()->format('Y/m/d');
+                    
+                    if ($folderPath) {
+                        $basePath .= '/' . trim($folderPath, '/');
+                    }
+
+                    if (!Storage::disk('public')->exists($basePath)) {
+                        Storage::disk('public')->makeDirectory($basePath, 0755, true);
+                    }
+
+                    $filename = $file->getClientOriginalName();
+                    $storedPath = $file->storeAs($basePath, $filename, 'public');
+
+                    if (!$storedPath) {
+                        continue;
+                    }
+
+                    $fileModel = File::create([
+                        'user_id' => $userId,
+                        'name' => $filename,
+                        'path' => $storedPath,
+                        'mime_type' => $file->getMimeType(),
+                        'size' => $file->getSize(),
+                        'folder_path' => $basePath,
+                    ]);
+
+                    // Add preview info to response
+                    $fileModel->preview = $fileModel->preview;
+                    $uploadedFiles[] = $fileModel;
+
+                } catch (\Exception $e) {
+                    \Log::error("Error uploading file {$file->getClientOriginalName()}: " . $e->getMessage());
+                    continue;
+                }
+            }
+
+            if (empty($uploadedFiles)) {
+                throw new \Exception('No files were uploaded successfully');
+            }
 
             return response()->json([
                 'success' => true,
-                'file' => $fileModel,
-                'message' => 'File uploaded successfully'
+                'files' => $uploadedFiles,
+                'message' => 'Files uploaded successfully'
             ]);
 
         } catch (\Exception $e) {
             \Log::error('Upload error: ' . $e->getMessage());
             return response()->json([
                 'success' => false,
-                'message' => $e->getMessage()
+                'message' => $e->getMessage(),
+                'debug' => config('app.debug') ? $e->getTraceAsString() : null
             ], 422);
         }
     }
